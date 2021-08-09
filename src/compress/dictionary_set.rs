@@ -117,25 +117,24 @@ impl<'a> DictionarySetBuilder<'a> {
 	/// Adds all files in a directory to the builder.
 	pub fn add_directory(&mut self, path: impl AsRef<Path>) -> Result<&mut Self> {
 		trace!("Walking directory {}...", path.as_ref().display());
-		let r: jwalk::Result<Vec<_>> = WalkDir::new(path.as_ref())
+		let r: jwalk::Result<Vec<jwalk::DirEntry<((), ())>>> = WalkDir::new(path.as_ref())
 			.skip_hidden(false)
-			.follow_links(true)
+			.follow_links(false)
 			.into_iter()
-			.par_bridge()
-			.filter_map(|r| match r {
-				Ok(x) => {
-					let path = x.path();
-					if !path.is_file() {
-						None
-					} else {
-						let mime = classify_file_mime(&path);
-						Some(Ok((mime, BuilderSource::File(x.path()))))
-					}
+			.collect();
+		let r: Vec<_> = r?
+			.into_par_iter()
+			.filter_map(|x| {
+				let path = x.path();
+				if !path.is_file() {
+					None
+				} else {
+					let mime = classify_file_mime(&path);
+					Some((mime, BuilderSource::File(x.path())))
 				}
-				Err(e) => Some(Err(e)),
 			})
 			.collect();
-		for (mime, source) in r? {
+		for (mime, source) in r {
 			self.sources.entry(mime).or_default().push(source);
 		}
 		Ok(self)
