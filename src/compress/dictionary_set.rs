@@ -1,5 +1,7 @@
 use crate::errors::*;
 
+use jwalk::WalkDir;
+use rayon::prelude::*;
 use std::{
 	borrow::Cow,
 	collections::HashMap,
@@ -50,36 +52,30 @@ impl<'a> BuilderSource<'a> {
 
 // TODO: Customizable dictionary max sizes.
 
-#[derive(Default)]
-struct DictionaryBuilder {
-	linear: Vec<u8>,
-	sizes: Vec<usize>,
+fn read_path(path: &Path, target: &mut Vec<u8>) -> Result<()> {
+	File::open(path)?.read_to_end(target)?;
+	Ok(())
 }
-impl DictionaryBuilder {
-	fn build_from_files(&mut self, sources: &[BuilderSource<'_>]) -> Result<Vec<u8>> {
-		self.linear.clear();
-		self.sizes.clear();
-		for file in sources {
-			match file {
-				BuilderSource::File(path) => {
-					let len = self.linear.len();
-					File::open(path)?.read_to_end(&mut self.linear)?;
-					let size = self.linear.len() - len;
-					self.sizes.push(size);
+fn dictionary_from_files(sources: &[BuilderSource<'_>]) -> Result<Vec<u8>> {
+	let mut linear = Vec::new();
+	let mut sizes = Vec::new();
+	for file in sources {
+		match file {
+			BuilderSource::File(path) => {
+				let len = linear.len();
+				if let Err(e) = read_path(path, &mut linear) {
+					warn!("Skipping file {} due to error: {:?}", path.display(), e);
 				}
-				BuilderSource::Data(_, data) => {
-					self.linear.extend_from_slice(&data);
-					self.sizes.push(data.len());
-				}
+				sizes.push(linear.len() - len);
+			}
+			BuilderSource::Data(_, data) => {
+				linear.extend_from_slice(&data);
+				sizes.push(data.len());
 			}
 		}
-		trace!(
-			" - Creating dictionary from {} bytes and {} files",
-			self.linear.len(),
-			self.sizes.len(),
-		);
-		Ok(zstd::dict::from_continuous(&self.linear, &self.sizes, 1024 * 1024)?)
 	}
+	trace!(" - Creating dictionary from {} bytes and {} files", linear.len(), sizes.len());
+	Ok(zstd::dict::from_continuous(&linear, &sizes, 1024 * 1024)?)
 }
 
 /// A builder for [`DictionarySet`]s.
@@ -96,41 +92,99 @@ impl<'a> DictionarySetBuilder<'a> {
 		let mime = source.classify();
 		self.sources.entry(mime).or_default().push(source);
 	}
-	pub fn add_file(&mut self, path: impl AsRef<Path>) {
-		self.add_source(BuilderSource::File(path.as_ref().to_path_buf()));
-	}
-	pub fn add_data(&mut self, path: impl AsRef<Path>, data: impl Into<Cow<'a, [u8]>>) {
-		self.add_source(BuilderSource::Data(path.as_ref().to_path_buf(), data.into()))
+
+	/// Adds a new file data source to the builder.
+	///
+	/// If the given path is not a file, it is ignored.
+	pub fn add_file(&mut self, path: impl AsRef<Path>) -> &mut Self {
+		let path = path.as_ref();
+		if path.is_file() {
+			self.add_source(BuilderSource::File(path.to_path_buf()));
+		}
+		self
 	}
 
-	pub fn build(self) -> Result<DictionarySet> {
-		let mut set = DictionarySet { mime_dictionaries: Default::default() };
-		let mut builder = DictionaryBuilder::default();
-		let mut octet_stream = Vec::new();
+	/// Adds a new data source to the builder.
+	pub fn add_data(
+		&mut self,
+		path: impl AsRef<Path>,
+		data: impl Into<Cow<'a, [u8]>>,
+	) -> &mut Self {
+		self.add_source(BuilderSource::Data(path.as_ref().to_path_buf(), data.into()));
+		self
+	}
 
-		for (k, files) in self.sources {
-			trace!("Creating dictionary for MIME: {}", k);
-			if k == OCTET_STREAM {
-				octet_stream.extend(files);
-			} else {
-				match builder.build_from_files(&files) {
-					Ok(dict) => {
-						set.mime_dictionaries.insert(k, dict);
-					},
-					Err(e) => {
-						trace!(" - Failed, falling back to application/octet-stream dictionary");
-						trace!(" - Cause: {:?}", e);
-						octet_stream.extend(files);
+	/// Adds all files in a directory to the builder.
+	pub fn add_directory(&mut self, path: impl AsRef<Path>) -> Result<&mut Self> {
+		trace!("Walking directory {}...", path.as_ref().display());
+		let r: jwalk::Result<Vec<_>> = WalkDir::new(path.as_ref())
+			.skip_hidden(false)
+			.follow_links(true)
+			.into_iter()
+			.par_bridge()
+			.filter_map(|r| match r {
+				Ok(x) => {
+					let path = x.path();
+					if !path.is_file() {
+						None
+					} else {
+						let mime = classify_file_mime(&path);
+						Some(Ok((mime, BuilderSource::File(x.path()))))
 					}
-				};
+				}
+				Err(e) => Some(Err(e)),
+			})
+			.collect();
+		for (mime, source) in r? {
+			self.sources.entry(mime).or_default().push(source);
+		}
+		Ok(self)
+	}
+
+
+	pub fn build(&mut self) -> Result<DictionarySet> {
+		enum MimeResult<'a> {
+			Dictionary(&'static str, Vec<u8>),
+			Failed(Vec<BuilderSource<'a>>),
+		}
+		let r: Vec<MimeResult<'a>> = std::mem::take(&mut self.sources).into_par_iter()
+			.map(|x| {
+				let (mime, files) = x;
+				let span = trace_span!("dict", mime);
+				let _guard = span.enter();
+
+				trace!("Creating dictionary for MIME: {}", mime);
+				if mime == OCTET_STREAM {
+					MimeResult::Failed(files)
+				} else {
+					match dictionary_from_files(&files) {
+						Ok(dict) => MimeResult::Dictionary(mime, dict),
+						Err(e) => {
+							trace!(" - Failed, adding to application/octet-stream dictionary");
+							trace!(" - Cause: {:?}", e);
+							MimeResult::Failed(files)
+						}
+					}
+				}
+			})
+			.collect();
+
+		let mut set = DictionarySet { mime_dictionaries: Default::default() };
+		let mut octet_stream = Vec::new();
+		for res in r {
+			match res {
+				MimeResult::Dictionary(mime, dict) => {
+					set.mime_dictionaries.insert(mime, dict);
+				},
+				MimeResult::Failed(files) => octet_stream.extend(files),
 			}
 		}
 
 		trace!("Creating dictionary for MIME: application/octet-stream");
-		match builder.build_from_files(&octet_stream) {
+		match dictionary_from_files(&octet_stream) {
 			Ok(dict) => {
 				set.mime_dictionaries.insert(OCTET_STREAM, dict);
-			},
+			}
 			Err(e) => {
 				trace!(" - Failed to create fallback dictionary: {:?}", e);
 			}
