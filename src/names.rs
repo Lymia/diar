@@ -24,31 +24,32 @@ macro_rules! name {
 
 name! {
 	// String encodings
-	LlNameTable "..:name" // Name table entry argument encoding (escape for `..` names)
-	LlVarUInt "..:varuint" // VarUInt argument encoding
-	LlUtf8 "..:utf8" // UTF-8 argument encoding
-	Ll16Bit "..:16bit" // UTF-16 argument encoding
-	Ll8Bit "..:8bit" // bytes argument encoding
+	LlNameTable "..:name"
+	LlVarUInt "..:varuint"
+	LlUtf8 "..:utf8"
+	Ll16Bit "..:16bit"
+	Ll8Bit "..:8bit"
 
 	// Object encodings
-	LlEmpty "..:empty" // empty object encoding
-	LlBlob "..:blob" // blob object encoding
-	LlDir "..:dir" // directory object encoding
+	LlEmpty "..:empty"
+	LlBlob "..:blob"
+	LlDir "..:dir"
 
 	// Boolean values
-	CoreTrue "..:true" // true value
-	CoreFalse "..:false" // false value
+	CoreTrue "..:true"
+	CoreFalse "..:false"
 
 	// Core names
-	CoreDir ".:dir" // directory object type
-	CoreFile ".:file" // file object type
-	CoreData ".:contents" // contents stream name
+	TypeDir ".type:dir"
+	TypeFile ".type:file"
 
-	// Compression-related names
-	CoreUncompressed ".:uncompressed" // uncompressed compression method
-	CoreZstd ".:zstd" // zstd compression method
-	CoreDictionary ".:dictionary" // zstd dictionary parameter
-	CoreDictionaries ".:dictionaries" // zstd dictionaries hive
+	// Compression algorithms
+	CompressionNone ".compression:none"
+	CompressionZstd ".compression:zstd"
+
+	// Compression metadata
+	ZstdDictionary ".zstd:dictionary"
+	ZstdDictionaries ".zstd:dictionaries"
 }
 
 /// A name which may or may not be registered in the string table.

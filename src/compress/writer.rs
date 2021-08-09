@@ -1,9 +1,9 @@
-use crate::{
-	errors::*,
-	names::{KnownName, Name},
-};
+use crate::errors::*;
+use crate::names::{KnownName, Name};
 use byteorder::*;
-use std::{collections::HashMap, io::Write, sync::Arc};
+use std::collections::HashMap;
+use std::io::Write;
+use std::sync::Arc;
 
 pub struct CompressWriter<W: Write> {
 	out: W,

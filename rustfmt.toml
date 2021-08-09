@@ -1,6 +1,6 @@
 max_width = 100
 width_heuristics = "Max"
-imports_granularity = "Crate"
+imports_granularity = "Module"
 merge_derives = false
 overflow_delimited_expr = true
 struct_lit_single_line = true
