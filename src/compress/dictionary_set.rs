@@ -1,5 +1,6 @@
 use crate::errors::*;
 
+use derive_setters::Setters;
 use jwalk::WalkDir;
 use rayon::prelude::*;
 use std::{
@@ -10,24 +11,32 @@ use std::{
 	path::{Path, PathBuf},
 };
 
+// TODO: Add a way to speed up dictionary construction by taking a subset of files only.
+
 const OCTET_STREAM: &'static str = "application/octet-stream";
 
-fn classify_file_mime(file: &Path) -> &'static str {
+fn classify_file_mime(file: &Path) -> Cow<'static, str> {
 	match tree_magic_mini::from_filepath(file) {
-		Some(v) => v,
-		None => match mime_guess::from_path(file).first_raw() {
-			Some(v) => v,
-			None => OCTET_STREAM,
+		Some(OCTET_STREAM) | None => match mime_guess::from_path(file).first_raw() {
+			Some(v) => v.into(),
+			None => match file.extension().and_then(|x| x.to_str()) {
+				Some(x) => format!(".ext:{}", x).into(),
+				None => OCTET_STREAM.into(),
+			}
 		},
+		Some(v) => v.into(),
 	}
 }
-fn classify_byte_buf(filename: &Path, buf: &[u8]) -> &'static str {
+fn classify_byte_buf(filename: &Path, buf: &[u8]) -> Cow<'static, str> {
 	match tree_magic_mini::from_u8(buf) {
 		OCTET_STREAM => match mime_guess::from_path(filename).first_raw() {
-			Some(v) => v,
-			None => OCTET_STREAM,
+			Some(v) => v.into(),
+			None => match filename.extension().and_then(|x| x.to_str()) {
+				Some(x) => format!(".ext:{}", x).into(),
+				None => OCTET_STREAM.into(),
+			},
 		},
-		v => v,
+		v => v.into(),
 	}
 }
 
@@ -42,7 +51,7 @@ impl<'a> BuilderSource<'a> {
 			BuilderSource::Data(path, _) => path,
 		}
 	}
-	fn classify(&self) -> &'static str {
+	fn classify(&self) -> Cow<'static, str> {
 		match self {
 			BuilderSource::File(path) => classify_file_mime(path),
 			BuilderSource::Data(path, data) => classify_byte_buf(path, data),
@@ -50,13 +59,11 @@ impl<'a> BuilderSource<'a> {
 	}
 }
 
-// TODO: Customizable dictionary max sizes.
-
 fn read_path(path: &Path, target: &mut Vec<u8>) -> Result<()> {
 	File::open(path)?.read_to_end(target)?;
 	Ok(())
 }
-fn dictionary_from_files(sources: &[BuilderSource<'_>]) -> Result<Vec<u8>> {
+fn dictionary_from_files(sources: &[BuilderSource<'_>], max_size: usize) -> Result<Vec<u8>> {
 	let mut linear = Vec::new();
 	let mut sizes = Vec::new();
 	for file in sources {
@@ -75,17 +82,28 @@ fn dictionary_from_files(sources: &[BuilderSource<'_>]) -> Result<Vec<u8>> {
 		}
 	}
 	trace!(" - Creating dictionary from {} bytes and {} files", linear.len(), sizes.len());
-	Ok(zstd::dict::from_continuous(&linear, &sizes, 1024 * 1024)?)
+	Ok(zstd::dict::from_continuous(&linear, &sizes, max_size)?)
 }
 
 /// A builder for [`DictionarySet`]s.
+#[derive(Setters)]
 pub struct DictionarySetBuilder<'a> {
-	sources: HashMap<&'static str, Vec<BuilderSource<'a>>>,
+	#[setters(skip)]
+	sources: HashMap<Cow<'static, str>, Vec<BuilderSource<'a>>>,
+
+	/// Sets the maximum size of every dictionary.
+	///
+	/// Note that a dictionary is generated for every MIME type present in the source files, hence
+	/// the total sizes of all dictionaries in the source data may be significantly larger.
+	max_dictionary_size: usize,
 }
 impl<'a> DictionarySetBuilder<'a> {
 	/// Creates a new builder.
 	pub fn new() -> Self {
-		DictionarySetBuilder { sources: HashMap::new() }
+		DictionarySetBuilder {
+			sources: HashMap::new(),
+			max_dictionary_size: 1024 * 512, // 512 KiB
+		}
 	}
 
 	fn add_source(&mut self, source: BuilderSource<'a>) {
@@ -140,23 +158,24 @@ impl<'a> DictionarySetBuilder<'a> {
 		Ok(self)
 	}
 
-
+	/// Builds dictionaries from the provided files.
 	pub fn build(&mut self) -> Result<DictionarySet> {
 		enum MimeResult<'a> {
-			Dictionary(&'static str, Vec<u8>),
+			Dictionary(Cow<'static, str>, Vec<u8>),
 			Failed(Vec<BuilderSource<'a>>),
 		}
-		let r: Vec<MimeResult<'a>> = std::mem::take(&mut self.sources).into_par_iter()
+		let r: Vec<MimeResult<'a>> = std::mem::take(&mut self.sources)
+			.into_par_iter()
 			.map(|x| {
 				let (mime, files) = x;
-				let span = trace_span!("dict", mime);
+				let span = trace_span!("dict", mime = mime.as_ref());
 				let _guard = span.enter();
 
 				trace!("Creating dictionary for MIME: {}", mime);
 				if mime == OCTET_STREAM {
 					MimeResult::Failed(files)
 				} else {
-					match dictionary_from_files(&files) {
+					match dictionary_from_files(&files, self.max_dictionary_size) {
 						Ok(dict) => MimeResult::Dictionary(mime, dict),
 						Err(e) => {
 							trace!(" - Failed, adding to application/octet-stream dictionary");
@@ -174,15 +193,15 @@ impl<'a> DictionarySetBuilder<'a> {
 			match res {
 				MimeResult::Dictionary(mime, dict) => {
 					set.mime_dictionaries.insert(mime, dict);
-				},
+				}
 				MimeResult::Failed(files) => octet_stream.extend(files),
 			}
 		}
 
 		trace!("Creating dictionary for MIME: application/octet-stream");
-		match dictionary_from_files(&octet_stream) {
+		match dictionary_from_files(&octet_stream, self.max_dictionary_size) {
 			Ok(dict) => {
-				set.mime_dictionaries.insert(OCTET_STREAM, dict);
+				set.mime_dictionaries.insert(OCTET_STREAM.into(), dict);
 			}
 			Err(e) => {
 				trace!(" - Failed to create fallback dictionary: {:?}", e);
@@ -202,7 +221,7 @@ impl<'a> DictionarySetBuilder<'a> {
 /// A dictionary set which may be used to compress an `diar` archive.
 pub struct DictionarySet {
 	/// The dictionary for each MIME type.
-	mime_dictionaries: HashMap<&'static str, Vec<u8>>,
+	pub(crate) mime_dictionaries: HashMap<Cow<'static, str>, Vec<u8>>,
 }
 impl DictionarySet {
 	/// Creates a builder for a dictionary set.

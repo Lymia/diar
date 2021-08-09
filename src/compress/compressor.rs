@@ -4,11 +4,21 @@ use crate::{
 };
 use jwalk::WalkDir;
 use std::path::Path;
+use zstd::dict::CDict;
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use crate::compress::writer::CompressWriter;
 
-fn is_symlink(path: &Path) -> bool {
-	std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+/*
+struct LoadedDictSet {
+	dicts: HashMap<>
 }
 
+fn write_blob(mut source: impl Read, target: &mut CompressWriter<impl Write>)
+
+ */
 pub fn compress_dir(dir: &Path) -> Result<()> {
+	let dicts = DictionarySet::builder().add_directory(dir).unwrap().build().unwrap();
+
 	Ok(())
 }

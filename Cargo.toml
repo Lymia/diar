@@ -5,6 +5,7 @@ edition = "2018"
 
 [dependencies]
 byteorder = "1.4"
+derive_setters = "0.1.5"
 fs2 = "0.4"
 jwalk = "0.6"
 memmap2 = "0.3"
