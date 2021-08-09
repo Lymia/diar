@@ -8,20 +8,22 @@ use std::{
 	path::{Path, PathBuf},
 };
 
+const OCTET_STREAM: &'static str = "application/octet-stream";
+
 fn classify_file_mime(file: &Path) -> &'static str {
 	match tree_magic_mini::from_filepath(file) {
 		Some(v) => v,
 		None => match mime_guess::from_path(file).first_raw() {
 			Some(v) => v,
-			None => "application/octet-stream",
+			None => OCTET_STREAM,
 		},
 	}
 }
 fn classify_byte_buf(filename: &Path, buf: &[u8]) -> &'static str {
 	match tree_magic_mini::from_u8(buf) {
-		"application/octet-stream" => match mime_guess::from_path(filename).first_raw() {
+		OCTET_STREAM => match mime_guess::from_path(filename).first_raw() {
 			Some(v) => v,
-			None => "application/octet-stream",
+			None => OCTET_STREAM,
 		},
 		v => v,
 	}
@@ -32,11 +34,51 @@ enum BuilderSource<'a> {
 	Data(PathBuf, Cow<'a, [u8]>),
 }
 impl<'a> BuilderSource<'a> {
+	fn path(&self) -> &Path {
+		match self {
+			BuilderSource::File(path) => path,
+			BuilderSource::Data(path, _) => path,
+		}
+	}
 	fn classify(&self) -> &'static str {
 		match self {
 			BuilderSource::File(path) => classify_file_mime(path),
 			BuilderSource::Data(path, data) => classify_byte_buf(path, data),
 		}
+	}
+}
+
+// TODO: Customizable dictionary max sizes.
+
+#[derive(Default)]
+struct DictionaryBuilder {
+	linear: Vec<u8>,
+	sizes: Vec<usize>,
+}
+impl DictionaryBuilder {
+	fn build_from_files(&mut self, sources: &[BuilderSource<'_>]) -> Result<Vec<u8>> {
+		self.linear.clear();
+		self.sizes.clear();
+		for file in sources {
+			match file {
+				BuilderSource::File(path) => {
+					let len = self.linear.len();
+					File::open(path)?.read_to_end(&mut self.linear)?;
+					let size = self.linear.len() - len;
+					self.sizes.push(size);
+				}
+				BuilderSource::Data(_, data) => {
+					self.linear.extend_from_slice(&data);
+					self.sizes.push(data.len());
+				}
+			}
+		}
+		trace!(
+			" - Creating dictionary from {} bytes and {} files",
+			self.linear.len(),
+			self.sizes.len(),
+		);
+		Ok(zstd::dict::from_continuous(&self.linear, &self.sizes, 1024 * 1024)?)
 	}
 }
 
@@ -62,38 +104,43 @@ impl<'a> DictionarySetBuilder<'a> {
 	}
 
 	pub fn build(self) -> Result<DictionarySet> {
-		let mut set =
-			DictionarySet { meta_dictionary: vec![], mime_dictionaries: Default::default() };
-		let mut linear = Vec::new();
-		let mut sizes = Vec::new();
+		let mut set = DictionarySet { mime_dictionaries: Default::default() };
+		let mut builder = DictionaryBuilder::default();
+		let mut octet_stream = Vec::new();
 
 		for (k, files) in self.sources {
-			for file in files {
-				match file {
-					BuilderSource::File(path) => {
-						let len = linear.len();
-						File::open(path)?.read_to_end(&mut linear)?;
-						sizes.push(linear.len() - len);
+			trace!("Creating dictionary for MIME: {}", k);
+			if k == OCTET_STREAM {
+				octet_stream.extend(files);
+			} else {
+				match builder.build_from_files(&files) {
+					Ok(dict) => {
+						set.mime_dictionaries.insert(k, dict);
+					},
+					Err(e) => {
+						trace!(" - Failed, falling back to application/octet-stream dictionary");
+						trace!(" - Cause: {:?}", e);
+						octet_stream.extend(files);
 					}
-					BuilderSource::Data(_, data) => {
-						linear.extend_from_slice(&data);
-						sizes.push(data.len());
-					}
-				}
+				};
 			}
-
-			let dict = zstd::dict::from_continuous(&linear, &sizes, 1024 * 1024)?; // TODO Customizable size
-			set.mime_dictionaries.insert(k, dict);
-
-			linear.clear();
-			sizes.clear();
 		}
 
-		for (_, dict) in &set.mime_dictionaries {
-			linear.extend_from_slice(&dict);
-			sizes.push(dict.len());
+		trace!("Creating dictionary for MIME: application/octet-stream");
+		match builder.build_from_files(&octet_stream) {
+			Ok(dict) => {
+				set.mime_dictionaries.insert(OCTET_STREAM, dict);
+			},
+			Err(e) => {
+				trace!(" - Failed to create fallback dictionary: {:?}", e);
+			}
 		}
-		set.meta_dictionary = zstd::dict::from_continuous(&linear, &sizes, 1024 * 1024)?; // TODO Customizable size
+		std::mem::drop(octet_stream);
+
+		trace!("Dictionaries completed!");
+		for (k, v) in &set.mime_dictionaries {
+			trace!(" - Dictionary for {}: {} bytes", k, v.len());
+		}
 
 		Ok(set)
 	}
@@ -101,8 +148,6 @@ impl<'a> DictionarySetBuilder<'a> {
 
 /// A dictionary set which may be used to compress an `diar` archive.
 pub struct DictionarySet {
-	/// The "meta" dictionary which is used to compress the other dictionaries.
-	meta_dictionary: Vec<u8>,
 	/// The dictionary for each MIME type.
 	mime_dictionaries: HashMap<&'static str, Vec<u8>>,
 }
