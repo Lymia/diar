@@ -39,6 +39,7 @@ impl DirNode {
 		let data: jwalk::Result<Vec<_>> = WalkDirGeneric::<(PathBuf, PathBuf)>::new(path)
 			.follow_links(false)
 			.skip_hidden(false)
+			.sort(true)
 			.root_read_dir_state(PathBuf::new())
 			.process_read_dir(|_depth, _path, read_dir_state, children| {
 				for child in children {

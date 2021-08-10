@@ -1,9 +1,11 @@
+use crate::compress::dictionary_set::LoadedDictionarySet;
 use crate::errors::*;
 use crate::names::{KnownName, Name};
 use byteorder::*;
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Write, BufWriter};
 use std::sync::Arc;
+use zstd::Encoder;
 
 pub struct CompressWriter<W: Write> {
 	out: W,
@@ -11,8 +13,15 @@ pub struct CompressWriter<W: Write> {
 	string_table: Vec<Arc<str>>,
 }
 impl<W: Write> CompressWriter<W> {
-	pub fn write_varuint(&mut self, data: impl Into<u64>) -> Result<()> {
-		let mut data = data.into();
+	pub fn new(w: W) -> Self {
+		CompressWriter {
+			out: w,
+			string_table_index: Default::default(),
+			string_table: vec![],
+		}
+	}
+
+	pub fn write_varuint(&mut self, mut data: u64) -> Result<()> {
 		loop {
 			let frag = data & 0x7F;
 			data = data >> 7;
@@ -77,7 +86,7 @@ impl<W: Write> CompressWriter<W> {
 	pub fn write_arg_string_interned(&mut self, value: &str) -> Result<()> {
 		self.encode_string_name(&Name::from(value))
 	}
-	pub fn write_arg_varuint(&mut self, value: impl Into<u64>) -> Result<()> {
+	pub fn write_arg_varuint(&mut self, value: u64) -> Result<()> {
 		self.write_known_name(KnownName::LlVarUInt)?;
 		self.write_varuint(value)?;
 		Ok(())
@@ -88,5 +97,18 @@ impl<W: Write> CompressWriter<W> {
 		} else {
 			self.write_known_name(KnownName::CoreFalse)
 		}
+	}
+
+	pub fn compress_stream<'a>(
+		&'a mut self,
+		mime: &str,
+		set: &LoadedDictionarySet<'a>,
+	) -> Result<Encoder<impl Write + 'a>> {
+		let mut zstd = match set.get_for_mime(mime) {
+			Some(x) => Encoder::with_prepared_dictionary(BufWriter::new(&mut self.out), x)?,
+			None => Encoder::new(BufWriter::new(&mut self.out), set.level)?,
+		};
+		zstd.include_checksum(true)?;
+		Ok(zstd)
 	}
 }

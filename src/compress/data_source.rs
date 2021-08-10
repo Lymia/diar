@@ -2,7 +2,7 @@ use crate::compress::constants::OCTET_STREAM;
 use crate::errors::*;
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 fn classify_file_mime(file: &Path) -> Cow<'static, str> {
@@ -62,6 +62,17 @@ impl ResolvedDataSource {
 			}
 			ResolvedDataSource::Data { data, .. } => {
 				vec.extend_from_slice(data);
+			}
+		}
+		Ok(())
+	}
+	pub fn write_to_stream(&self, out: &mut impl Write) -> Result<()> {
+		match self {
+			ResolvedDataSource::Path { path, .. } => {
+				std::io::copy(&mut File::open(path)?, out)?;
+			}
+			ResolvedDataSource::Data { data, .. } => {
+				out.write_all(data)?;
 			}
 		}
 		Ok(())

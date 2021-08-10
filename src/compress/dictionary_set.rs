@@ -5,12 +5,15 @@ use crate::compress::data_source::ResolvedDataSource;
 use crate::compress::dir_tree::DirNodeData;
 use crate::compress::DirNode;
 use derive_setters::Setters;
+use rand::prelude::*;
+use rand_pcg::Lcg64Xsh32;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use zstd::dict::EncoderDictionary;
 
 // TODO: Add a way to speed up dictionary construction by taking a subset of files only.
 
@@ -21,7 +24,12 @@ fn read_path(path: &Path, target: &mut Vec<u8>) -> Result<()> {
 fn dictionary_from_files(sources: &[&ResolvedDataSource], max_size: usize) -> Result<Vec<u8>> {
 	let mut linear = Vec::new();
 	let mut sizes = Vec::new();
-	for source in sources {
+
+	// TODO: Add configuration to this.
+	let mut sources = sources.to_vec();
+	let mut rng = Lcg64Xsh32::new(0xcafef00dd15ea5e5, 0xa02bdbf7bb3c0a7);
+	sources.shuffle(&mut rng);
+	for source in sources.iter() {
 		let len = linear.len();
 		if let Err(e) = source.push_to_vec(&mut linear) {
 			warn!("Skipping file due to error: {:?}", e);
@@ -49,7 +57,7 @@ impl<'a> DictionarySetBuilder<'a> {
 	pub fn new() -> Self {
 		DictionarySetBuilder {
 			sources: HashMap::new(),
-			max_dictionary_size: 1024 * 512, // 512 KiB
+			max_dictionary_size: 1024 * 128, // 128 KiB
 		}
 	}
 
@@ -130,12 +138,34 @@ impl<'a> DictionarySetBuilder<'a> {
 
 /// A dictionary set which may be used to compress an `diar` archive.
 pub struct DictionarySet {
-	/// The dictionary for each MIME type.
-	pub(crate) mime_dictionaries: HashMap<Cow<'static, str>, Vec<u8>>,
+	mime_dictionaries: HashMap<Cow<'static, str>, Vec<u8>>,
 }
 impl DictionarySet {
 	/// Creates a builder for a dictionary set.
 	pub fn builder<'a>() -> DictionarySetBuilder<'a> {
 		DictionarySetBuilder::new()
+	}
+
+	pub fn iter_dicts(&self) -> impl Iterator<Item = (&str, &[u8])> {
+		self.mime_dictionaries.iter().map(|(k, v)| (k.as_ref(), v.as_slice()))
+	}
+
+	pub(crate) fn load(&self, level: i32) -> LoadedDictionarySet<'_> {
+		let mut dictionaries = HashMap::new();
+		for (k, v) in &self.mime_dictionaries {
+			dictionaries.insert(k.as_ref(), EncoderDictionary::new(v.as_slice(), level));
+		}
+		LoadedDictionarySet { level, mime_dictionaries: dictionaries }
+	}
+}
+
+/// A dictionary loaded and prepared for use by the archiver.
+pub struct LoadedDictionarySet<'a> {
+	pub level: i32,
+	mime_dictionaries: HashMap<&'a str, EncoderDictionary<'a>>,
+}
+impl<'a> LoadedDictionarySet<'a> {
+	pub fn get_for_mime(&self, mime: &str) -> Option<&EncoderDictionary<'a>> {
+		self.mime_dictionaries.get(mime).or_else(|| self.mime_dictionaries.get(OCTET_STREAM))
 	}
 }
