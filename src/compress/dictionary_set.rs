@@ -11,9 +11,10 @@ use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, ErrorKind};
 use std::path::Path;
 use zstd::dict::EncoderDictionary;
+use std::ffi::CStr;
 
 // TODO: Add a way to speed up dictionary construction by taking a subset of files only.
 
@@ -21,14 +22,50 @@ fn read_path(path: &Path, target: &mut Vec<u8>) -> Result<()> {
 	File::open(path)?.read_to_end(target)?;
 	Ok(())
 }
+fn train_from_continuous(linear: &[u8], sizes: &[usize], max_size: usize) -> Result<Vec<u8>> {
+	unsafe {
+		let mut data: Vec<u8> = Vec::with_capacity(max_size);
+		data.set_len(max_size);
+
+		assert_eq!(sizes.iter().sum::<usize>(), linear.len());
+		let result = zstd_sys::ZDICT_trainFromBuffer_fastCover(
+			data.as_mut_ptr() as *mut _,
+			data.len(),
+			linear.as_ptr() as *const _,
+			sizes.as_ptr(),
+			sizes.len() as u32,
+			zstd_sys::ZDICT_fastCover_params_t {
+				k: 16,
+				d: 8,
+				f: 26,
+				steps: 0,
+				nbThreads: num_cpus::get() as u32,
+				splitPoint: 0.85,
+				accel: 1,
+				shrinkDict: 1,
+				shrinkDictMaxRegression: 5,
+				zParams: zstd_sys::ZDICT_params_t {
+					compressionLevel: 0, // TODO Figure out how to thread this through.
+					notificationLevel: 0,
+					dictID: 0
+				}
+			}
+		);
+		if zstd_sys::ZSTD_isError(result) != 0 {
+			let cstr = CStr::from_ptr(zstd_sys::ZSTD_getErrorName(result));
+			let err = cstr.to_str().unwrap();
+			Err(std::io::Error::new(ErrorKind::Other, err).into())
+		} else {
+			data.set_len(result);
+			data.shrink_to_fit();
+			Ok(data)
+		}
+	}
+}
 fn dictionary_from_files(sources: &[&ResolvedDataSource], max_size: usize) -> Result<Vec<u8>> {
 	let mut linear = Vec::new();
 	let mut sizes = Vec::new();
 
-	// TODO: Add configuration to this.
-	let mut sources = sources.to_vec();
-	let mut rng = Lcg64Xsh32::new(0xcafef00dd15ea5e5, 0xa02bdbf7bb3c0a7);
-	sources.shuffle(&mut rng);
 	for source in sources.iter() {
 		let len = linear.len();
 		if let Err(e) = source.push_to_vec(&mut linear) {
@@ -37,7 +74,7 @@ fn dictionary_from_files(sources: &[&ResolvedDataSource], max_size: usize) -> Re
 		sizes.push(linear.len() - len);
 	}
 	trace!(" - Creating dictionary from {} bytes and {} files", linear.len(), sizes.len());
-	Ok(zstd::dict::from_continuous(&linear, &sizes, max_size)?)
+	Ok(train_from_continuous(&linear, &sizes, max_size)?)
 }
 
 /// A builder for [`DictionarySet`]s.

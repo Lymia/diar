@@ -1,4 +1,4 @@
-#![feature(backtrace)]
+#![deny(unused_must_use)]
 
 #[macro_use]
 extern crate tracing;

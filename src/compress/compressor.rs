@@ -4,7 +4,7 @@ use crate::compress::dir_tree::{DirNode, DirNodeData};
 use crate::compress::writer::CompressWriter;
 use crate::errors::*;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use crate::names::KnownName;
 
 fn write_file(
@@ -48,8 +48,9 @@ pub fn compress(dir: &Path, mut target: impl Write) -> Result<()> {
 	let loaded = dicts.load(12);
 
 	// test
+	std::fs::create_dir(PathBuf::from("dict")).unwrap();
 	for (k, v) in dicts.iter_dicts() {
-		std::fs::write(format!("{}.dict", k.replace("/", ":")), v)?;
+		std::fs::write(format!("dict/{}.dict", k.replace("/", ":")), v)?;
 	}
 
 	write_dir(&mut CompressWriter::new(&mut target), &nodes, &loaded)?;

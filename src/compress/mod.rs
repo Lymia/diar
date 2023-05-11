@@ -1,5 +1,3 @@
-#[deny(unused_must_use)]
-
 mod compressor;
 mod data_source;
 mod dictionary_set;
