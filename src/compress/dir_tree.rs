@@ -1,7 +1,6 @@
 use crate::compress::data_source::ResolvedDataSource;
 use crate::errors::*;
 use jwalk::WalkDirGeneric;
-use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +11,7 @@ pub struct DirNode {
 }
 #[derive(Debug)]
 pub(crate) enum DirNodeData {
-    FileNode { contents: ResolvedDataSource, mime_type: Cow<'static, str> },
+    FileNode { contents: ResolvedDataSource },
     DirNode { contents: HashMap<String, DirNode> },
 }
 impl DirNode {
@@ -54,22 +53,6 @@ impl DirNode {
             .collect();
         let data = data?;
 
-        // Append mime type metadata to the directory list.
-        let data: Result<Vec<_>> = data
-            .into_par_iter()
-            .map(|x| -> Result<_> {
-                let path = x.path();
-                if path.is_dir() {
-                    Ok((x.depth(), path, None, None))
-                } else {
-                    let resolved = ResolvedDataSource::from_path(&path)?;
-                    let mime = resolved.mime_type();
-                    Ok((x.depth(), path, Some(resolved), Some(mime)))
-                }
-            })
-            .collect();
-        let data = data?;
-
         // Convert the linear directory data into the tree model.
         struct DirStack(Vec<(String, DirNode)>);
         impl DirStack {
@@ -89,8 +72,10 @@ impl DirNode {
         }
 
         let mut dirs_stack = DirStack(Vec::new());
-        for (depth, path, contents, mime) in data {
-            if depth < dirs_stack.0.len() {
+        for t in data {
+            let path = t.parent_path;
+
+            if t.depth < dirs_stack.0.len() {
                 dirs_stack.pop_node();
             }
 
@@ -100,8 +85,7 @@ impl DirNode {
             } else if path.is_file() {
                 dirs_stack.push_file(name, DirNode {
                     data: DirNodeData::FileNode {
-                        contents: contents.unwrap(),
-                        mime_type: mime.unwrap(),
+                        contents: ResolvedDataSource::from_path(&path)?,
                     },
                 });
             } else {

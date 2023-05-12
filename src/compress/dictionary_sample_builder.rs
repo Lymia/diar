@@ -92,6 +92,7 @@ impl BuildSamples {
 
     fn push_sample(&mut self, hash: u64, sample: &[u8]) {
         if sample.len() >= self.min_bucket_chunk_size {
+            // whiten the hash from the raw hasher
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             hasher.write_u64(hash);
             let hash = hasher.finish();

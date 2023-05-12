@@ -6,6 +6,8 @@ pub enum Error {
     IoError(Box<std::io::Error>, &'static Location<'static>),
     #[error("encountered while iterating directory at {1}: {0}")]
     JWalkError(Box<jwalk::Error>, &'static Location<'static>),
+    #[error("encountered while iterating directory at {1}: {0}")]
+    FastCDC(Box<fastcdc::v2020::Error>, &'static Location<'static>),
 }
 impl From<std::io::Error> for Error {
     #[track_caller]
@@ -17,6 +19,12 @@ impl From<jwalk::Error> for Error {
     #[track_caller]
     fn from(err: jwalk::Error) -> Self {
         Error::JWalkError(Box::new(err), Location::caller())
+    }
+}
+impl From<fastcdc::v2020::Error> for Error {
+    #[track_caller]
+    fn from(err: fastcdc::v2020::Error) -> Self {
+        Error::FastCDC(Box::new(err), Location::caller())
     }
 }
 

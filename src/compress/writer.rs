@@ -102,7 +102,8 @@ impl<W: Write> CompressWriter<W> {
     ) -> Result<Encoder<impl Write + 'a>> {
         let mut zstd = Encoder::with_prepared_dictionary(BufWriter::new(&mut self.out), dict)?;
         zstd.include_checksum(true)?;
-        zstd.set_parameter(CParameter::WindowLog(27))?;
+        zstd.set_parameter(CParameter::WindowLog(26))?;
+        zstd.set_parameter(CParameter::EnableDedicatedDictSearch(true))?;
         Ok(zstd)
     }
 }
