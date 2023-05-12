@@ -23,33 +23,33 @@ macro_rules! name {
 }
 
 name! {
-	// String encodings
-	LlNameTable "..:name"
-	LlVarUInt "..:varuint"
-	LlUtf8 "..:utf8"
-	Ll16Bit "..:16bit"
-	Ll8Bit "..:8bit"
+    // String encodings
+    LlNameTable "..:name"
+    LlVarUInt "..:varuint"
+    LlUtf8 "..:utf8"
+    Ll16Bit "..:16bit"
+    Ll8Bit "..:8bit"
 
-	// Object encodings
-	LlEmpty "..:empty"
-	LlBlob "..:blob"
-	LlDir "..:dir"
+    // Object encodings
+    LlEmpty "..:empty"
+    LlBlob "..:blob"
+    LlDir "..:dir"
 
-	// Boolean values
-	CoreTrue "..:true"
-	CoreFalse "..:false"
+    // Boolean values
+    CoreTrue "..:true"
+    CoreFalse "..:false"
 
-	// Core names
-	TypeDir ".type:dir"
-	TypeFile ".type:file"
+    // Core names
+    TypeDir ".type:dir"
+    TypeFile ".type:file"
 
-	// Compression algorithms
-	CompressionNone ".compression:none"
-	CompressionZstd ".compression:zstd"
+    // Compression algorithms
+    CompressionNone ".compression:none"
+    CompressionZstd ".compression:zstd"
 
-	// Compression metadata
-	ZstdDictionary ".zstd:dictionary"
-	ZstdDictionaries ".zstd:dictionaries"
+    // Compression metadata
+    ZstdDictionary ".zstd:dictionary"
+    ZstdDictionaries ".zstd:dictionaries"
 }
 
 /// A name which may or may not be registered in the string table.
@@ -57,69 +57,69 @@ name! {
 pub struct Name<'a>(NameData<'a>);
 #[derive(Clone, Debug, Hash)]
 enum NameData<'a> {
-	Known(KnownName),
-	Owned(Cow<'a, str>),
+    Known(KnownName),
+    Owned(Cow<'a, str>),
 }
 impl<'a> Name<'a> {
-	/// Returns the string underlying this name.
-	pub fn as_str(&self) -> &str {
-		match &self.0 {
-			NameData::Known(name) => name.as_str(),
-			NameData::Owned(str) => str.as_ref(),
-		}
-	}
+    /// Returns the string underlying this name.
+    pub fn as_str(&self) -> &str {
+        match &self.0 {
+            NameData::Known(name) => name.as_str(),
+            NameData::Owned(str) => str.as_ref(),
+        }
+    }
 
-	pub fn is_known(&self) -> bool {
-		match &self.0 {
-			NameData::Known(_) => true,
-			NameData::Owned(_) => false,
-		}
-	}
+    pub fn is_known(&self) -> bool {
+        match &self.0 {
+            NameData::Known(_) => true,
+            NameData::Owned(_) => false,
+        }
+    }
 
-	/// Whether this name is low level. (i.e. starts with `..`)
-	pub fn is_low_level(&self) -> bool {
-		self.as_str().starts_with("..")
-	}
+    /// Whether this name is low level. (i.e. starts with `..`)
+    pub fn is_low_level(&self) -> bool {
+        self.as_str().starts_with("..")
+    }
 }
 
 impl<'a, 'b> PartialEq<Name<'a>> for Name<'b> {
-	fn eq(&self, other: &Name<'a>) -> bool {
-		match (self, other) {
-			(Name(NameData::Known(a)), Name(NameData::Known(b))) => a == b,
-			(a, b) => a.as_str() == b.as_str(),
-		}
-	}
+    fn eq(&self, other: &Name<'a>) -> bool {
+        match (self, other) {
+            (Name(NameData::Known(a)), Name(NameData::Known(b))) => a == b,
+            (a, b) => a.as_str() == b.as_str(),
+        }
+    }
 }
 impl<'a> Eq for Name<'a> {}
 
 impl<'a> From<KnownName> for Name<'a> {
-	fn from(name: KnownName) -> Self {
-		Name(NameData::Known(name))
-	}
+    fn from(name: KnownName) -> Self {
+        Name(NameData::Known(name))
+    }
 }
 impl<'a> From<&'a str> for Name<'a> {
-	fn from(name: &'a str) -> Self {
-		match KnownName::from_str(name) {
-			Some(v) => v.into(),
-			None => Name(NameData::Owned(name.into())),
-		}
-	}
+    fn from(name: &'a str) -> Self {
+        match KnownName::from_str(name) {
+            Some(v) => v.into(),
+            None => Name(NameData::Owned(name.into())),
+        }
+    }
 }
 impl<'a> From<String> for Name<'a> {
-	fn from(name: String) -> Self {
-		match KnownName::from_str(&name) {
-			Some(v) => v.into(),
-			None => Name(NameData::Owned(name.into())),
-		}
-	}
+    fn from(name: String) -> Self {
+        match KnownName::from_str(&name) {
+            Some(v) => v.into(),
+            None => Name(NameData::Owned(name.into())),
+        }
+    }
 }
 impl<'a> From<Cow<'a, str>> for Name<'a> {
-	fn from(name: Cow<'a, str>) -> Self {
-		match KnownName::from_str(&name) {
-			Some(v) => v.into(),
-			None => Name(NameData::Owned(name)),
-		}
-	}
+    fn from(name: Cow<'a, str>) -> Self {
+        match KnownName::from_str(&name) {
+            Some(v) => v.into(),
+            None => Name(NameData::Owned(name)),
+        }
+    }
 }
 
 pub type StaticName = Name<'static>;
