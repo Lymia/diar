@@ -1,7 +1,6 @@
 mod compressor;
 mod data_source;
 mod dictionary_sample_builder;
-mod dictionary_set;
 mod dir_tree;
 mod writer;
 

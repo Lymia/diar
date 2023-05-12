@@ -1,24 +1,23 @@
 use crate::compress::data_source::ResolvedDataSource;
-use crate::compress::dictionary_set::{DictionarySetBuilder, LoadedDictionarySet};
+use crate::compress::dictionary_sample_builder::{BuildSamples, BuildSamplesConfiguration};
 use crate::compress::dir_tree::{DirNode, DirNodeData};
 use crate::compress::writer::CompressWriter;
 use crate::errors::*;
 use crate::names::KnownName;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use zstd::dict::EncoderDictionary;
 
 fn write_file(
     target: &mut CompressWriter<impl Write>,
     contents: &ResolvedDataSource,
-    mime_type: &str,
-    dicts: &LoadedDictionarySet<'_>,
+    dict: &EncoderDictionary,
 ) -> Result<()> {
     target.write_known_name(KnownName::CompressionZstd)?;
     target.write_varuint(1)?;
     target.write_known_name(KnownName::ZstdDictionary)?;
-    target.write_name(&mime_type.into())?;
 
-    let mut zstd = target.compress_stream(mime_type, dicts)?;
+    let mut zstd = target.compress_stream(dict)?;
     contents.write_to_stream(&mut zstd)?;
     zstd.finish()?;
 
@@ -27,15 +26,15 @@ fn write_file(
 fn write_dir(
     target: &mut CompressWriter<impl Write>,
     node: &DirNode,
-    dicts: &LoadedDictionarySet<'_>,
+    dict: &EncoderDictionary,
 ) -> Result<()> {
     match &node.data {
-        DirNodeData::FileNode { contents, mime_type, .. } => {
-            write_file(target, contents, mime_type, dicts)?;
+        DirNodeData::FileNode { contents, .. } => {
+            write_file(target, contents, dict)?;
         }
         DirNodeData::DirNode { contents, .. } => {
             for node in contents.values() {
-                write_dir(target, node, dicts)?;
+                write_dir(target, node, dict)?;
             }
         }
     }
@@ -44,19 +43,22 @@ fn write_dir(
 
 pub fn compress(dir: &Path, mut target: impl Write) -> Result<()> {
     let nodes = DirNode::from_path(dir)?;
-    let dicts = DictionarySetBuilder::new().add_nodes(&nodes)?.build()?;
-    let loaded = dicts.load(12);
 
     // test
     if !PathBuf::from("dict").exists() {
         std::fs::create_dir(PathBuf::from("dict"))?;
     }
-    for (k, v) in dicts.iter_dicts() {
-        let new_path = format!("dict/{}.dict", k.replace("/", ":"));
-        std::fs::remove_file(&new_path)?;
-        std::fs::write(&new_path, v)?;
-    }
+    let mut samples = BuildSamples::new(&BuildSamplesConfiguration::default());
 
-    write_dir(&mut CompressWriter::new(&mut target), &nodes, &loaded)?;
+    trace!("Building samples...");
+    samples.add_nodes(&nodes)?;
+    trace!("Building dictionary...");
+    let data = samples.build_dictionary(1024 * 512)?;
+    std::fs::write("dict/test_dict.dict", &data)?;
+    trace!("Compressing data...");
+    let dict = EncoderDictionary::new(&data, 12);
+    write_dir(&mut CompressWriter::new(&mut target), &nodes, &dict)?;
+    trace!("Done!");
+
     Ok(())
 }

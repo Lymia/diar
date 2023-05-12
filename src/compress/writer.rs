@@ -1,10 +1,11 @@
-use crate::compress::dictionary_set::LoadedDictionarySet;
 use crate::errors::*;
 use crate::names::{KnownName, Name};
 use byteorder::*;
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::sync::Arc;
+use zstd::dict::EncoderDictionary;
+use zstd::zstd_safe::CParameter;
 use zstd::Encoder;
 
 pub struct CompressWriter<W: Write> {
@@ -97,14 +98,11 @@ impl<W: Write> CompressWriter<W> {
 
     pub fn compress_stream<'a>(
         &'a mut self,
-        mime: &str,
-        set: &LoadedDictionarySet<'a>,
+        dict: &'a EncoderDictionary<'a>,
     ) -> Result<Encoder<impl Write + 'a>> {
-        let mut zstd = match set.get_for_mime(mime) {
-            Some(x) => Encoder::with_prepared_dictionary(BufWriter::new(&mut self.out), x)?,
-            None => Encoder::new(BufWriter::new(&mut self.out), set.level)?,
-        };
+        let mut zstd = Encoder::with_prepared_dictionary(BufWriter::new(&mut self.out), dict)?;
         zstd.include_checksum(true)?;
+        zstd.set_parameter(CParameter::WindowLog(27))?;
         Ok(zstd)
     }
 }
