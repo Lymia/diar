@@ -1,8 +1,10 @@
 use crate::errors::*;
-use std::borrow::Cow;
-use std::fs::File;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    borrow::Cow,
+    fs::File,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug)]
 pub enum ResolvedDataSource {

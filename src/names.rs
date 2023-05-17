@@ -23,33 +23,15 @@ macro_rules! name {
 }
 
 name! {
-    // String encodings
-    LlNameTable "..:name"
-    LlVarUInt "..:varuint"
-    LlUtf8 "..:utf8"
-    Ll16Bit "..:16bit"
-    Ll8Bit "..:8bit"
+    // Core object types
+    CoreObjectBlobPlain "..:obj.BlobPlain"
+    CoreObjectBlobZstd "..:obj.BlobZstd"
+    CoreObjectZstdDictionary "..:obj.ZstdDictionary"
+    CoreObjectZstdPatchDictionary "..:obj.ZstdPatchDictionary"
 
-    // Object encodings
-    LlEmpty "..:empty"
-    LlBlob "..:blob"
-    LlDir "..:dir"
-
-    // Boolean values
-    CoreTrue "..:true"
-    CoreFalse "..:false"
-
-    // Core names
-    TypeDir ".type:dir"
-    TypeFile ".type:file"
-
-    // Compression algorithms
-    CompressionNone ".compression:none"
-    CompressionZstd ".compression:zstd"
-
-    // Compression metadata
-    ZstdDictionary ".zstd:dictionary"
-    ZstdDictionaries ".zstd:dictionaries"
+    // Directory-related
+    CoreObjectMetadata "..:obj.Metadata"
+    CoreObjectDirectory "..:obj.Directory"
 }
 
 /// A name which may or may not be registered in the string table.

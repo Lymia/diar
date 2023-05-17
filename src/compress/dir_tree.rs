@@ -1,9 +1,10 @@
-use crate::compress::data_source::ResolvedDataSource;
-use crate::errors::*;
+use crate::{compress::data_source::ResolvedDataSource, errors::*};
 use jwalk::WalkDirGeneric;
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug)]
 pub struct DirNode {
@@ -31,7 +32,8 @@ impl DirNode {
     }
 
     pub fn from_path(path: impl AsRef<Path>) -> Result<DirNode> {
-        let path = path.as_ref();
+        let path = std::fs::canonicalize(path.as_ref())?;
+        let path = path.as_path();
         trace!("Building directory tree for {}...", path.display());
 
         // Find all directories and files in the paths.
@@ -54,6 +56,7 @@ impl DirNode {
         let data = data?;
 
         // Convert the linear directory data into the tree model.
+        #[derive(Debug)]
         struct DirStack(Vec<(String, DirNode)>);
         impl DirStack {
             fn enter_dir(&mut self, name: String) {
@@ -73,7 +76,8 @@ impl DirNode {
 
         let mut dirs_stack = DirStack(Vec::new());
         for t in data {
-            let path = t.parent_path;
+            let mut path = t.parent_path.to_path_buf();
+            path.push(t.file_name);
 
             if t.depth < dirs_stack.0.len() {
                 dirs_stack.pop_node();

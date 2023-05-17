@@ -1,64 +1,81 @@
-use crate::compress::data_source::ResolvedDataSource;
-use crate::compress::dictionary_sample_builder::{BuildSamples, BuildSamplesConfiguration};
-use crate::compress::dir_tree::{DirNode, DirNodeData};
-use crate::compress::writer::CompressWriter;
-use crate::errors::*;
-use crate::names::KnownName;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use zstd::dict::EncoderDictionary;
+use crate::{
+    compress::{
+        data_source::ResolvedDataSource,
+        dictionary_sample_builder::{BuildSamples, BuildSamplesConfiguration},
+        dir_tree::{DirNode, DirNodeData},
+        writer::{DiarWriter, ObjectId},
+    },
+    errors::*,
+    names::KnownName,
+};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
+use zstd::{dict::EncoderDictionary, zstd_safe::CompressionLevel};
+
+const LEVEL: CompressionLevel = 6;
 
 fn write_file(
-    target: &mut CompressWriter<impl Write>,
+    target: &mut DiarWriter<impl Write>,
     contents: &ResolvedDataSource,
+    dict_obj: ObjectId,
     dict: &EncoderDictionary,
-) -> Result<()> {
-    target.write_known_name(KnownName::CompressionZstd)?;
-    target.write_varuint(1)?;
-    target.write_known_name(KnownName::ZstdDictionary)?;
-
-    let mut zstd = target.compress_stream(dict)?;
-    contents.write_to_stream(&mut zstd)?;
-    zstd.finish()?;
-
-    Ok(())
+) -> Result<ObjectId> {
+    target.write_compressed_blob(LEVEL, Some((dict_obj, dict)), |x| {
+        contents.write_to_stream(x)?;
+        Ok(())
+    })
 }
 fn write_dir(
-    target: &mut CompressWriter<impl Write>,
+    target: &mut DiarWriter<impl Write>,
     node: &DirNode,
+    dict_obj: ObjectId,
     dict: &EncoderDictionary,
-) -> Result<()> {
+) -> Result<ObjectId> {
     match &node.data {
-        DirNodeData::FileNode { contents, .. } => {
-            write_file(target, contents, dict)?;
-        }
+        DirNodeData::FileNode { contents, .. } => write_file(target, contents, dict_obj, dict),
         DirNodeData::DirNode { contents, .. } => {
-            for node in contents.values() {
-                write_dir(target, node, dict)?;
+            let mut entries = Vec::new();
+            for (name, node) in contents {
+                let id = write_dir(target, node, dict_obj, dict)?;
+                entries.push((name, id));
             }
+
+            let mut dir = target.start_write_directory()?;
+            for (name, node) in entries {
+                dir.write_entry(name, node, None)?;
+            }
+            dir.finish()
         }
     }
-    Ok(())
 }
 
 pub fn compress(dir: &Path, mut target: impl Write) -> Result<()> {
     let nodes = DirNode::from_path(dir)?;
+    let mut writer = DiarWriter::new(&mut target)?;
 
     // test
     if !PathBuf::from("dict").exists() {
         std::fs::create_dir(PathBuf::from("dict"))?;
     }
-    let mut samples = BuildSamples::new(&BuildSamplesConfiguration::default());
 
     trace!("Building samples...");
+    let mut samples = BuildSamples::new(&BuildSamplesConfiguration::default());
     samples.add_nodes(&nodes)?;
+
     trace!("Building dictionary...");
-    let data = samples.build_dictionary(1024 * 512)?;
+    let data = samples.build_dictionary()?;
     std::fs::write("dict/test_dict.dict", &data)?;
+    let dict_obj = writer.write_dictionary(&data)?;
+
     trace!("Compressing data...");
-    let dict = EncoderDictionary::new(&data, 12);
-    write_dir(&mut CompressWriter::new(&mut target), &nodes, &dict)?;
-    trace!("Done!");
+    let dict = EncoderDictionary::new(&data, LEVEL);
+    let root_obj = write_dir(&mut writer, &nodes, dict_obj, &dict)?;
+    trace!(" - Done!");
+
+    trace!("Finishing archive...");
+    writer.finish(root_obj)?;
 
     Ok(())
 }

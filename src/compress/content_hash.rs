@@ -1,8 +1,10 @@
 use crate::errors::*;
 use fastcdc::v2020::FastCDC;
-use std::fmt::{Display, Formatter};
-use std::hash::Hasher;
-use std::io::Read;
+use std::{
+    fmt::{Display, Formatter},
+    hash::Hasher,
+    io::Read,
+};
 
 const HASH_COUNT: usize = 64;
 

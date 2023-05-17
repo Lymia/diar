@@ -1,14 +1,16 @@
-use std::fs::File;
-use std::io::{BufReader, Write};
-use std::path::PathBuf;
+use std::{
+    fs::File,
+    io::{BufReader, Write},
+    path::PathBuf,
+};
 use zstd::zstd_safe::{CParameter, DParameter};
 
 fn main() {
     tracing_subscriber::fmt::init();
-    /*let path = PathBuf::from("pkmn_test");
-    diar::compress::compress(&path, File::create("pkmn_test.diar").unwrap()).unwrap();*/
+    let path = PathBuf::from("./linux-6.3.2");
+    diar::compress::compress(&path, File::create("linux-6.3.2.diar").unwrap()).unwrap();
 
-    let mut files = Vec::new();
+    /*let mut files = Vec::new();
     for file in std::fs::read_dir("pkmn_test").unwrap() {
         let file = file.unwrap();
         let path = file.path();
@@ -37,7 +39,7 @@ fn main() {
         println!()
     }
 
-    /*let mut out = zstd::Encoder::with_dictionary(
+    let mut out = zstd::Encoder::with_dictionary(
         File::create("test_file.bin").unwrap(),
         12,
         &std::fs::read("pkmn_test/Pokemon - Diamond Version (USA) (Rev 5).nds").unwrap(),
