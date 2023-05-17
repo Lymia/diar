@@ -7,9 +7,10 @@ use gearhash::Table;
 use priority_queue::DoublePriorityQueue;
 use std::{
     borrow::Borrow,
+    cmp,
+    collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
 };
-use std::collections::hash_map::DefaultHasher;
 use twox_hash::Xxh3Hash64;
 
 pub static GEAR_TABLE: Table = [
@@ -99,6 +100,9 @@ pub struct BuildSamplesConfiguration {
     pub excess_samples_factor: usize,
     pub hash_table_size: usize,
     pub chunker: ChunkConfig,
+
+    pub basic_dict_samples_count: usize,
+    pub basic_dict_samples_max_size: usize,
 }
 impl Default for BuildSamplesConfiguration {
     fn default() -> Self {
@@ -107,6 +111,8 @@ impl Default for BuildSamplesConfiguration {
             excess_samples_factor: 2,
             hash_table_size: 1024 * 1024 * 64, // 512 MiB total size
             chunker: ChunkConfig::new(0x0000000000008835, 16, 256), // avg 1/64 chance
+            basic_dict_samples_count: 128,
+            basic_dict_samples_max_size: 1024 * 32,
         }
     }
 }
@@ -143,7 +149,7 @@ fn do_chunk(cfg: ChunkConfig, data: &[u8], mut callback: impl FnMut(&[u8])) {
             return;
         }
 
-        let max_count = std::cmp::min(data.len() - start, cfg.max);
+        let max_count = cmp::min(data.len() - start, cfg.max);
         let count = chunking.next_match(&data[start..start + max_count], cfg.mask);
         let end = match count {
             Some(x) => start + x,
@@ -212,7 +218,7 @@ impl ChunkBuilder {
             let ct_b = bloom_insert!(hash_b);
             let ct_c = bloom_insert!(hash_c);
 
-            (hash_a, std::cmp::min(ct_a, std::cmp::min(ct_b, ct_c)))
+            (hash_a, cmp::min(ct_a, cmp::min(ct_b, ct_c)))
         };
 
         // just change the hash count if it's already in the queue
@@ -234,7 +240,7 @@ impl ChunkBuilder {
             .pop()
             .unwrap_or_else(|| self.priority_queue.pop_min().unwrap().0);
         new_cell.hash = hash;
-        new_cell.data_size = std::cmp::min(chunk.len(), new_cell.data.len());
+        new_cell.data_size = cmp::min(chunk.len(), new_cell.data.len());
         new_cell.data[..new_cell.data_size].copy_from_slice(&chunk[..new_cell.data_size]);
         self.priority_queue.push(new_cell, count);
     }
@@ -244,17 +250,10 @@ impl ChunkBuilder {
     }
 
     fn build_dictionary(mut self, max_size: usize) -> Vec<u8> {
-        let median_n = 9 * self.hash_count.len() / 10;
-        let median = *self.hash_count.select_nth_unstable(median_n).1;
         drop((self.alloc_cells, self.hash_count));
 
         let mut dictionary_data = Vec::new();
         while let Some((chunk, usage)) = self.priority_queue.pop_max() {
-            if usage < median {
-                break;
-            }
-
-            trace!(" - size: {}B, usage: {}B, limit: {}B", chunk.data_size, usage, median);
             dictionary_data.extend(&chunk.data);
             if dictionary_data.len() >= max_size {
                 break;
@@ -266,17 +265,62 @@ impl ChunkBuilder {
     }
 }
 
+struct SamplesBuilder {
+    samples: Vec<Vec<u8>>,
+    hash: Xxh3Hash64,
+    processed: usize,
+
+    samples_count: usize,
+    samples_max_size: usize,
+}
+impl SamplesBuilder {
+    fn new(cfg: &BuildSamplesConfiguration) -> SamplesBuilder {
+        SamplesBuilder {
+            samples: vec![],
+            hash: Xxh3Hash64::with_seed(1234),
+            processed: 0,
+            samples_count: cfg.basic_dict_samples_count,
+            samples_max_size: cfg.basic_dict_samples_max_size,
+        }
+    }
+
+    fn push_sample(&mut self, data: &[u8]) {
+        self.hash.write(&data[..cmp::min(1024, data.len())]);
+
+        if self.samples.len() < self.samples_count {
+            let new_data = data[..cmp::min(self.samples_max_size, data.len())].to_vec();
+            self.samples.push(new_data);
+        } else if (self.hash.finish() as usize % self.processed) < self.samples_count {
+            let new_data = data[..cmp::min(self.samples_max_size, data.len())].to_vec();
+            let idx = (self.hash.finish() >> 32) as usize % self.samples.len();
+            self.samples[idx] = new_data;
+        }
+
+        self.processed += 1;
+    }
+
+    fn build_dictionary(mut self, max_size: usize) -> Result<Vec<u8>> {
+        Ok(zstd::dict::from_samples(&self.samples, max_size)?)
+    }
+}
+
 pub struct BuildSamples {
     chunk_builder: ChunkBuilder,
+    samples_builder: SamplesBuilder,
     target_size: usize,
 }
 impl BuildSamples {
     pub fn new(cfg: &BuildSamplesConfiguration) -> Self {
-        BuildSamples { chunk_builder: ChunkBuilder::new(cfg), target_size: cfg.dictionary_size }
+        BuildSamples {
+            chunk_builder: ChunkBuilder::new(cfg),
+            samples_builder: SamplesBuilder::new(cfg),
+            target_size: cfg.dictionary_size,
+        }
     }
 
     pub fn push_file(&mut self, data: &[u8]) {
         self.chunk_builder.push_file(data);
+        self.samples_builder.push_sample(data);
     }
     pub fn add_nodes(&mut self, node: &DirNode) -> Result<&mut Self> {
         match &node.data {
@@ -293,7 +337,11 @@ impl BuildSamples {
         }
         Ok(self)
     }
+
     pub fn build_dictionary(self) -> Result<Vec<u8>> {
-        Ok(self.chunk_builder.build_dictionary(self.target_size))
+        let mut new_dict = self.samples_builder.build_dictionary(256)?;
+        new_dict.extend(self.chunk_builder.build_dictionary(self.target_size));
+        new_dict.truncate(self.target_size);
+        Ok(new_dict)
     }
 }
