@@ -98,8 +98,7 @@ pub struct BuildSamplesConfiguration {
     pub dictionary_size: usize,
     pub excess_samples_factor: usize,
     pub hash_table_size: usize,
-    pub initial_chunker: ChunkConfig,
-    pub secondary_chunker: ChunkConfig,
+    pub chunker: ChunkConfig,
 }
 impl Default for BuildSamplesConfiguration {
     fn default() -> Self {
@@ -107,8 +106,7 @@ impl Default for BuildSamplesConfiguration {
             dictionary_size: 1024 * 512, // 512 KiB dictionary
             excess_samples_factor: 2,
             hash_table_size: 1024 * 1024 * 64, // 512 MiB total size
-            initial_chunker: ChunkConfig::new(0x0000000000008831, 16, 256), // avg 1/32 chance
-            secondary_chunker: ChunkConfig::new(0x0000000000000085, 8, 20), // avg 1/8 chance
+            chunker: ChunkConfig::new(0x0000000000008835, 16, 256), // avg 1/64 chance
         }
     }
 }
@@ -167,18 +165,16 @@ struct ChunkBuilder {
     priority_queue: DoublePriorityQueue<PriorityCell, u64>,
     alloc_cells: Vec<PriorityCell>,
     hash_count: Vec<u64>,
-
-    initial_chunker: ChunkConfig,
-    secondary_chunker: ChunkConfig,
+    chunker: ChunkConfig,
 }
 impl ChunkBuilder {
     fn new(cfg: &BuildSamplesConfiguration) -> Self {
         let mut alloc_cells = Vec::new();
-        let needed_samples = cfg.dictionary_size / cfg.initial_chunker.min;
+        let needed_samples = cfg.dictionary_size / cfg.chunker.min;
         for _ in 0..needed_samples * cfg.excess_samples_factor {
             alloc_cells.push(PriorityCell {
                 hash: 0,
-                data: vec![0; cfg.initial_chunker.max],
+                data: vec![0; cfg.chunker.max],
                 data_size: 0,
             });
         }
@@ -187,8 +183,7 @@ impl ChunkBuilder {
             priority_queue: DoublePriorityQueue::new(),
             alloc_cells,
             hash_count: vec![0; cfg.hash_table_size],
-            initial_chunker: cfg.initial_chunker,
-            secondary_chunker: cfg.secondary_chunker,
+            chunker: cfg.chunker,
         }
     }
 
@@ -245,18 +240,13 @@ impl ChunkBuilder {
     }
 
     fn push_file(&mut self, data: &[u8]) {
-        do_chunk(self.initial_chunker, data, |x| self.push_chunk(self.initial_chunker.mask, x));
+        do_chunk(self.chunker, data, |x| self.push_chunk(self.chunker.mask, x));
     }
 
     fn build_dictionary(mut self, max_size: usize) -> Vec<u8> {
         let median_n = 9 * self.hash_count.len() / 10;
         let median = *self.hash_count.select_nth_unstable(median_n).1;
         drop((self.alloc_cells, self.hash_count));
-
-        let usize_bits = 0usize.to_le_bytes().len() * 8;
-        let est_chunks_per_queue = self.initial_chunker.max / self.secondary_chunker.min;
-        let bloom_words = (1024 / usize_bits) * self.priority_queue.len() * est_chunks_per_queue;
-        let mut bloom = vec![0usize; bloom_words];
 
         let mut dictionary_data = Vec::new();
         while let Some((chunk, usage)) = self.priority_queue.pop_max() {
@@ -265,37 +255,7 @@ impl ChunkBuilder {
             }
 
             trace!(" - size: {}B, usage: {}B, limit: {}B", chunk.data_size, usage, median);
-            do_chunk(self.secondary_chunker, &chunk.data[..chunk.data_size], |chunk| {
-                let already_exists = {
-                    // generate 3 different hashes from the input data chunk
-                    let mut hasher = Xxh3Hash64::default();
-                    hasher.write(chunk);
-                    let mut hash_a = hasher.finish();
-
-                    let mut hasher = DefaultHasher::new();
-                    hasher.write_u64(hash_a ^ 0xaf26b06ed7d7f5f1);
-                    let mut hash_b = hasher.finish();
-                    hasher.write_u64(hash_a ^ 0x465f1a9ba3cb0687);
-                    let mut hash_c = hasher.finish();
-
-                    // check whether this likely already exists
-                    macro_rules! bloom_insert {
-                        ($hash:expr) => {{
-                            let raw_ct = ($hash as usize) % (bloom_words * usize_bits);
-                            let (word_idx, bit_idx) = (raw_ct / usize_bits, raw_ct % usize_bits);
-                            let exists = ((bloom[word_idx] >> bit_idx) & 1) == 1;
-                            bloom[word_idx] |= 1 << bit_idx;
-                            exists
-                        }};
-                    }
-                    bloom_insert!(hash_a) && bloom_insert!(hash_b) && bloom_insert!(hash_c)
-                };
-
-                if !already_exists {
-                    dictionary_data.extend(chunk);
-                }
-            });
-
+            dictionary_data.extend(&chunk.data);
             if dictionary_data.len() >= max_size {
                 break;
             }

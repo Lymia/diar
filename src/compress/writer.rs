@@ -154,7 +154,7 @@ impl<W: Write> DiarWriter<W> {
         }?;
         zstd.include_checksum(true)?;
         zstd.set_parameter(CParameter::CompressionLevel(level))?;
-        zstd.set_parameter(CParameter::WindowLog(28))?;
+        zstd.set_parameter(CParameter::WindowLog(30))?;
         zstd.set_parameter(CParameter::EnableDedicatedDictSearch(true))?;
         callback(&mut zstd)?;
         zstd.finish()?;
