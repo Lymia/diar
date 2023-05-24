@@ -1,17 +1,16 @@
 use crate::{
-    compress::{
-        dict_builder::{BuildSamples, BuildSamplesConfiguration},
-        dir_tree::{DataSource, DirNode, DirNodeData},
-        writer::{DiarWriter, ObjectId},
-    },
     errors::*,
     names::KnownName,
+    object_io::{DiarWriter, ObjectId},
+    writer::{
+        dict_builder::{BuildSamples, BuildSamplesConfiguration},
+        dir_tree::{DataSource, DirNode, DirNodeData},
+    },
 };
 use std::{
-    io::Write,
+    io::{Seek, Write},
     path::{Path, PathBuf},
 };
-use std::io::Seek;
 use zstd::{dict::EncoderDictionary, zstd_safe::CompressionLevel};
 
 const LEVEL: CompressionLevel = 6;

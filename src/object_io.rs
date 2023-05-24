@@ -5,8 +5,9 @@ use crate::{
 use byteorder::*;
 use std::{
     collections::HashMap,
+    fs::File,
     io,
-    io::{BufWriter, Write},
+    io::{BufWriter, Cursor, Seek, SeekFrom, Write},
     sync::Arc,
 };
 use zstd::{
@@ -15,8 +16,49 @@ use zstd::{
     Encoder,
 };
 
+const ARC_HEADER: u64 = u64::from_le_bytes(*b"DiarArc1");
+const END_HEADER: u64 = u64::from_le_bytes(*b"DiarEnd1");
+
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug, Hash)]
 pub struct ObjectId(u64);
+
+/// A trait for stream-like objects that can be efficiently truncated.
+pub trait Truncate {
+    /// Truncates the stream to a certain length.
+    ///
+    /// If the current location in the stream is past the end, this will also set the cursor to
+    /// the end of the stream.
+    fn truncate(&mut self, len: u64) -> io::Result<()>;
+}
+impl Truncate for Cursor<Vec<u8>> {
+    fn truncate(&mut self, len: u64) -> io::Result<()> {
+        if self.position() > len {
+            self.set_position(len);
+        }
+        self.get_mut().truncate(len as usize);
+        Ok(())
+    }
+}
+impl Truncate for File {
+    fn truncate(&mut self, len: u64) -> io::Result<()> {
+        if self.seek(SeekFrom::Current(0))? > len {
+            self.seek(SeekFrom::Start(len))?;
+        }
+        self.set_len(len)
+    }
+}
+
+pub struct DiarIo<S> {
+    stream: S,
+    string_table_index: HashMap<Arc<str>, u64>,
+    string_table: Vec<Arc<str>>,
+}
+impl<S: Write + Truncate> DiarIo<S> {
+    pub fn create(mut stream: S) -> Result<Self> {
+        stream.truncate(0)?;
+        Ok(todo!())
+    }
+}
 
 pub struct ByteCounter<W> {
     inner: W,
@@ -49,7 +91,7 @@ pub struct DiarWriter<W: Write> {
 }
 impl<W: Write> DiarWriter<W> {
     pub fn new(mut w: W) -> Result<Self> {
-        w.write_all(b"DiarArc1")?;
+        w.write_u64::<LE>(ARC_HEADER)?;
         Ok(DiarWriter {
             out: ByteCounter::new(w),
             string_table_index: Default::default(),
@@ -203,7 +245,7 @@ impl<W: Write> DiarWriter<W> {
         }
 
         let offset_end_header = self.count();
-        self.out.write_all(b"DiarEnd1")?;
+        self.out.write_u64::<LE>(END_HEADER)?;
         self.out.write_u64::<LE>(offset_string_table)?;
         self.out.write_u64::<LE>(offset_end_header)?;
         self.out.write_u64::<LE>(root.0)?;

@@ -3,9 +3,12 @@
 #[macro_use]
 extern crate tracing;
 
-pub mod compress;
 mod errors;
 mod names;
+mod object_io;
+mod objects;
+mod reader;
+pub mod writer;
 
 pub use errors::*;
 

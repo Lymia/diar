@@ -1,6 +1,6 @@
 use crate::{
-    compress::{dir_tree::DirNodeData, DirNode},
     errors::*,
+    writer::{dir_tree::DirNodeData, DirNode},
 };
 use derive_setters::Setters;
 use gearhash::Table;
