@@ -1,8 +1,10 @@
-use crate::{compress::data_source::ResolvedDataSource, errors::*};
+use crate::errors::*;
 use jwalk::WalkDirGeneric;
 use std::{
     borrow::Cow,
     collections::HashMap,
+    fs::File,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -12,7 +14,7 @@ pub struct DirNode {
 }
 #[derive(Debug)]
 pub(crate) enum DirNodeData {
-    FileNode { contents: ResolvedDataSource },
+    FileNode { contents: DataSource },
     DirNode { contents: HashMap<String, DirNode> },
 }
 impl DirNode {
@@ -88,9 +90,7 @@ impl DirNode {
                 dirs_stack.enter_dir(name);
             } else if path.is_file() {
                 dirs_stack.push_file(name, DirNode {
-                    data: DirNodeData::FileNode {
-                        contents: ResolvedDataSource::from_path(&path)?,
-                    },
+                    data: DirNodeData::FileNode { contents: DataSource::from_path(&path)? },
                 });
             } else {
                 warn!("Path {} is of unknown type!", path.display());
@@ -101,5 +101,49 @@ impl DirNode {
         }
 
         Ok(dirs_stack.0.pop().expect("Dir stack is empty?").1)
+    }
+}
+
+#[derive(Debug)]
+pub enum DataSource {
+    Path { path: PathBuf, len_hint: u64 },
+    Data { path_hint: PathBuf, data: Vec<u8> },
+}
+
+impl DataSource {
+    pub fn from_path(path: &Path) -> Result<DataSource> {
+        let path = path.to_path_buf();
+        let len_hint = path.metadata()?.len();
+        Ok(DataSource::Path { path, len_hint })
+    }
+
+    pub fn len_hint(&self) -> u64 {
+        match self {
+            DataSource::Path { len_hint, .. } => *len_hint,
+            DataSource::Data { data, .. } => data.len() as u64,
+        }
+    }
+
+    pub fn push_to_vec(&self, vec: &mut Vec<u8>) -> Result<()> {
+        match self {
+            DataSource::Path { path, .. } => {
+                File::open(path)?.read_to_end(vec)?;
+            }
+            DataSource::Data { data, .. } => {
+                vec.extend_from_slice(data);
+            }
+        }
+        Ok(())
+    }
+    pub fn write_to_stream(&self, out: &mut impl Write) -> Result<()> {
+        match self {
+            DataSource::Path { path, .. } => {
+                std::io::copy(&mut File::open(path)?, out)?;
+            }
+            DataSource::Data { data, .. } => {
+                out.write_all(data)?;
+            }
+        }
+        Ok(())
     }
 }

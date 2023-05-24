@@ -1,9 +1,8 @@
-mod compressor;
+mod diar_builder;
 pub mod content_hash;
-mod data_source;
-mod dictionary_sample_builder;
+mod dict_builder;
 mod dir_tree;
 mod writer;
 
-pub use compressor::compress;
+pub use diar_builder::compress;
 pub use dir_tree::DirNode;

@@ -1,8 +1,7 @@
 use crate::{
     compress::{
-        data_source::ResolvedDataSource,
-        dictionary_sample_builder::{BuildSamples, BuildSamplesConfiguration},
-        dir_tree::{DirNode, DirNodeData},
+        dict_builder::{BuildSamples, BuildSamplesConfiguration},
+        dir_tree::{DataSource, DirNode, DirNodeData},
         writer::{DiarWriter, ObjectId},
     },
     errors::*,
@@ -12,13 +11,14 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
+use std::io::Seek;
 use zstd::{dict::EncoderDictionary, zstd_safe::CompressionLevel};
 
 const LEVEL: CompressionLevel = 6;
 
 fn write_file(
     target: &mut DiarWriter<impl Write>,
-    contents: &ResolvedDataSource,
+    contents: &DataSource,
     dict_obj: ObjectId,
     dict: &EncoderDictionary,
 ) -> Result<ObjectId> {
