@@ -4,6 +4,7 @@ use std::{
     fmt::Debug,
     sync::atomic::{AtomicU64, Ordering},
 };
+use twox_hash::RandomXxh3HashBuilder64;
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug, Hash)]
 pub struct ObjectId(u64);
@@ -37,7 +38,14 @@ pub enum ObjectType {
 pub enum MetadataTag {
     ZstdPreloadList = 0x40,
     EntryArchive = 0x41,
+
+    EndTag = 0x7F,
 }
+
+pub const META_TAG_VARINT: u64 = 0;
+pub const META_TAG_VARUINT: u64 = 1;
+pub const META_TAG_OBJECTREF: u64 = 2;
+pub const META_TAG_STRING: u64 = 3;
 
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Debug, Hash)]
 #[repr(u32)]
@@ -45,6 +53,7 @@ pub enum Metadata {
     VarInt(i64),
     VarUInt(u64),
     ObjectRef(ObjectId),
+    String(String),
 }
 
 #[derive(Clone, Debug)]
@@ -63,26 +72,29 @@ pub struct DirectoryEntry {
     pub metadata: ObjectId,
 }
 
+pub type MetadataMap = HashMap<MetadataTag, Metadata, RandomXxh3HashBuilder64>;
+
 #[derive(Clone, Debug)]
 pub struct ObjMetadata {
-    pub metadata: HashMap<MetadataTag, Metadata>,
+    pub metadata: MetadataMap,
 }
 
 #[derive(Clone, Debug)]
 pub struct ObjArchive {
-    pub metadata: HashMap<MetadataTag, Metadata>,
+    pub root: ObjectId,
+    pub metadata: MetadataMap,
 }
 
 #[derive(Clone, Debug)]
 pub struct ObjRoot {
     pub main: ObjectId,
-    pub alt: HashMap<String, ObjectId>,
-    pub metadata: ObjectId,
+    pub alt: HashMap<String, ObjectId, RandomXxh3HashBuilder64>,
+    pub metadata: MetadataMap,
 }
 
 #[derive(Clone, Debug)]
 pub struct ObjFilterZstd {
-    pub sources: Vec<ObjectId>,
+    pub dict_sources: Vec<ObjectId>,
 }
 
 #[derive(Clone, Debug)]

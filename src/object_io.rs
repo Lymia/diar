@@ -1,6 +1,7 @@
 use crate::{
     errors::*,
     names::{KnownName, Name},
+    objects::*,
 };
 use byteorder::*;
 use std::{
@@ -10,6 +11,7 @@ use std::{
     io::{BufWriter, Cursor, Seek, SeekFrom, Write},
     sync::Arc,
 };
+use twox_hash::RandomXxh3HashBuilder64;
 use zstd::{
     dict::EncoderDictionary,
     zstd_safe::{CParameter, CompressionLevel},
@@ -18,9 +20,6 @@ use zstd::{
 
 const ARC_HEADER: u64 = u64::from_le_bytes(*b"DiarArc1");
 const END_HEADER: u64 = u64::from_le_bytes(*b"DiarEnd1");
-
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug, Hash)]
-pub struct ObjectId(u64);
 
 /// A trait for stream-like objects that can be efficiently truncated.
 pub trait Truncate {
@@ -50,225 +49,187 @@ impl Truncate for File {
 
 pub struct DiarIo<S> {
     stream: S,
-    string_table_index: HashMap<Arc<str>, u64>,
-    string_table: Vec<Arc<str>>,
+    obj_ids: HashMap<ObjectId, u64, RandomXxh3HashBuilder64>,
+    rel_offset: u64,
 }
-impl<S: Write + Truncate> DiarIo<S> {
+impl<S: Write + Seek> DiarIo<S> {
     pub fn create(mut stream: S) -> Result<Self> {
-        stream.truncate(0)?;
-        Ok(todo!())
+        stream.write_u64::<LE>(ARC_HEADER)?;
+        let rel_offset = stream.seek(SeekFrom::Current(0))?;
+        Ok(DiarIo { stream, obj_ids: Default::default(), rel_offset })
     }
-}
 
-pub struct ByteCounter<W> {
-    inner: W,
-    count: u64,
-}
-
-impl<W: Write> ByteCounter<W> {
-    fn new(inner: W) -> Self {
-        ByteCounter { inner, count: 0 }
-    }
-}
-
-impl<W: Write> Write for ByteCounter<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let res = self.inner.write(buf);
-        if let Ok(size) = res {
-            self.count += size as u64;
+    fn write_varint(&mut self, mut data: i64) -> Result<()> {
+        if data < 0 {
+            data = data ^ 0x7FFFFFFFFFFFFFFF;
         }
-        res
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-}
+        data = (data << 1) | ((data >> 63) & 1);
+        let mut data = data as u64;
 
-pub struct DiarWriter<W: Write> {
-    out: ByteCounter<W>,
-    string_table_index: HashMap<Arc<str>, u64>,
-    string_table: Vec<Arc<str>>,
-}
-impl<W: Write> DiarWriter<W> {
-    pub fn new(mut w: W) -> Result<Self> {
-        w.write_u64::<LE>(ARC_HEADER)?;
-        Ok(DiarWriter {
-            out: ByteCounter::new(w),
-            string_table_index: Default::default(),
-            string_table: vec![],
-        })
-    }
+        loop {
+            let frag = data & 0x7F;
+            data = data >> 7;
 
-    fn count(&self) -> u64 {
-        self.out.count
+            if data == 0 {
+                self.stream.write_u8(frag as u8)?;
+                break;
+            } else {
+                self.stream.write_u8(0x80 | frag as u8)?;
+            }
+        }
+        Ok(())
     }
-
     fn write_varuint(&mut self, mut data: u64) -> Result<()> {
         loop {
             let frag = data & 0x7F;
             data = data >> 7;
 
             if data == 0 {
-                self.out.write_u8(frag as u8)?;
+                self.stream.write_u8(frag as u8)?;
                 break;
             } else {
-                self.out.write_u8(0x80 | frag as u8)?;
+                self.stream.write_u8(0x80 | frag as u8)?;
             }
         }
         Ok(())
     }
-    fn intern_str(&mut self, str: &str) -> u64 {
-        match self.string_table_index.get(str) {
-            Some(x) => *x,
-            None => {
-                let str: Arc<str> = str.into();
-                let tok = self.string_table_index.len() as u64;
-
-                self.string_table_index.insert(str.clone(), tok);
-                self.string_table.push(str.clone());
-
-                tok
+    fn get_object_offset(&self, id: ObjectId) -> Result<u64> {
+        if id == ObjectId::NONE {
+            Ok(0)
+        } else {
+            match self.obj_ids.get(&id) {
+                Some(offset) => Ok(*offset),
+                None => ErrorContents::ObjectIdError(id).emit(),
             }
         }
     }
-
-    fn write_name(&mut self, name: &Name<'_>) -> Result<()> {
-        let id = self.intern_str(name.as_str());
+    fn write_object_id(&mut self, id: ObjectId) -> Result<()> {
+        let id = self.get_object_offset(id)?;
         self.write_varuint(id)
     }
-    fn write_known_name(&mut self, name: KnownName) -> Result<()> {
-        let id = self.intern_str(name.as_str());
-        self.write_varuint(id)
-    }
-
-    fn start_object(&mut self, name: KnownName) -> Result<ObjectId> {
-        let id = ObjectId(self.count());
-        self.write_known_name(name)?;
-        Ok(id)
-    }
-    fn write_opt_object_ref(&mut self, id: Option<ObjectId>) -> Result<()> {
-        match id {
-            Some(x) => self.write_object_ref(x),
-            None => self.write_varuint(0),
+    fn write_object_ids(&mut self, list: &[ObjectId]) -> Result<()> {
+        for id in list {
+            self.write_object_id(*id)?;
         }
-    }
-    fn write_object_ref(&mut self, id: ObjectId) -> Result<()> {
-        self.write_varuint(id.0 + 1)
+        self.write_object_id(ObjectId::NONE)?;
+        Ok(())
     }
     fn write_full_string(&mut self, value: &str) -> Result<()> {
         self.write_varuint(value.len() as u64)?;
-        self.out.write_all(value.as_bytes())?;
+        self.stream.write_all(value.as_bytes())?;
         Ok(())
     }
 
-    pub fn write_uncompressed_blob(
-        &mut self,
-        callback: impl FnOnce(&mut ByteCounter<W>) -> Result<()>,
-    ) -> Result<ObjectId> {
-        // write the raw object underlying the blob
-        let off_start = self.count();
-        callback(&mut self.out)?;
-        let length = self.count() - off_start;
-
-        // write the blob itself
-        let blob = self.start_object(KnownName::CoreObjectBlobPlain)?;
-        self.write_varuint(length)?;
-
-        // return the blob itself
-        Ok(blob)
-    }
-    pub fn write_compressed_blob(
-        &mut self,
-        level: CompressionLevel,
-        dict: Option<(ObjectId, &EncoderDictionary)>,
-        callback: impl FnOnce(&mut Encoder<BufWriter<&mut ByteCounter<W>>>) -> Result<()>,
-    ) -> Result<ObjectId> {
-        // write the raw object underlying the blob
-        let off_start = self.count();
-
-        let mut dict_id = None;
-        let mut zstd = match dict {
-            Some((id, dict)) => {
-                dict_id = Some(id);
-                Encoder::with_prepared_dictionary(BufWriter::new(&mut self.out), dict)
+    fn write_metadata(&mut self, metadata: &Metadata) -> Result<()> {
+        match metadata {
+            Metadata::VarInt(v) => {
+                self.write_varuint(META_TAG_VARINT)?;
+                self.write_varint(*v)?;
             }
-            None => Encoder::new(BufWriter::new(&mut self.out), level),
-        }?;
-        zstd.include_checksum(true)?;
-        zstd.set_parameter(CParameter::CompressionLevel(level))?;
-        zstd.set_parameter(CParameter::WindowLog(30))?;
-        zstd.set_parameter(CParameter::EnableDedicatedDictSearch(true))?;
-        callback(&mut zstd)?;
-        zstd.finish()?;
-
-        let length = self.count() - off_start;
-
-        // write the blob itself
-        let blob = self.start_object(KnownName::CoreObjectBlobZstd)?;
-        self.write_varuint(length)?;
-        self.write_opt_object_ref(dict_id)?;
-
-        // return the blob itself
-        Ok(blob)
+            Metadata::VarUInt(v) => {
+                self.write_varuint(META_TAG_VARUINT)?;
+                self.write_varuint(*v)?;
+            }
+            Metadata::ObjectRef(v) => {
+                self.write_varuint(META_TAG_OBJECTREF)?;
+                self.write_object_id(*v)?;
+            }
+            Metadata::String(v) => {
+                self.write_varuint(META_TAG_STRING)?;
+                self.write_full_string(v)?;
+            }
+        }
+        Ok(())
     }
-    pub fn write_dictionary(&mut self, dictionary: &[u8]) -> Result<ObjectId> {
-        let blob = self.write_compressed_blob(15, None, |x| {
-            x.write_all(dictionary)?;
-            Ok(())
-        })?;
-
-        let dict = self.start_object(KnownName::CoreObjectZstdDictionary)?;
-        self.write_object_ref(blob)?;
-        Ok(dict)
+    fn write_metadata_table(&mut self, table: &MetadataMap) -> Result<()> {
+        for (k, v) in table {
+            ensure(*k != MetadataTag::EndTag, &"early EndTag encountered!")?;
+            self.write_varuint(*k as u64)?;
+            self.write_metadata(v)?;
+        }
+        self.write_varuint(MetadataTag::EndTag as u64)?;
+        Ok(())
     }
-    pub fn write_patch_dictionary(
+
+    pub fn write_object(&mut self, obj: &DiarObject) -> Result<ObjectId> {
+        self.write_object_contents(obj, 0)
+    }
+    pub fn write_object_with_data(
         &mut self,
-        raw_dict: Option<ObjectId>,
-        patch_data: ObjectId,
+        obj: &DiarObject,
+        data_write: impl FnOnce(&mut S) -> Result<()>,
     ) -> Result<ObjectId> {
-        let dict = self.start_object(KnownName::CoreObjectZstdPatchDictionary)?;
-        self.write_opt_object_ref(raw_dict)?;
-        self.write_object_ref(patch_data)?;
-        Ok(dict)
+        let start_offset = self.stream.seek(SeekFrom::Current(0))?;
+        data_write(&mut self.stream)?;
+        let end_offset = self.stream.seek(SeekFrom::Current(0))?;
+        let length = end_offset - start_offset;
+        self.write_object_contents(obj, length)
     }
-
-    pub fn start_write_directory(&mut self) -> Result<WriteDirectory<W>> {
-        let id = self.start_object(KnownName::CoreObjectDirectory)?;
-        Ok(WriteDirectory(self, id))
-    }
-
-    pub fn finish(mut self, root: ObjectId) -> Result<()> {
-        let offset_string_table = self.count();
-        self.write_varuint(self.string_table.len() as u64)?;
-        for string in self.string_table.clone() {
-            self.write_full_string(&string)?;
+    fn write_object_contents(&mut self, obj: &DiarObject, length: u64) -> Result<ObjectId> {
+        let header_off = self.stream.seek(SeekFrom::Current(0))? - self.rel_offset;
+        match obj {
+            DiarObject::BlobPlain(obj) => {
+                self.write_varuint(ObjectType::BlobPlain as u64)?;
+                self.write_object_ids(&obj.filters)?;
+            }
+            DiarObject::Directory(obj) => {
+                self.write_varuint(ObjectType::Directory as u64)?;
+                ensure(length == 0, &"length not allowed for Directory")?;
+                for entry in &obj.entries {
+                    self.write_object_id(entry.data)?;
+                    self.write_object_id(entry.metadata)?;
+                    self.write_full_string(&entry.name)?;
+                }
+                self.write_object_id(ObjectId::NONE)?;
+            }
+            DiarObject::Metadata(obj) => {
+                self.write_varuint(ObjectType::Metadata as u64)?;
+                ensure(length == 0, &"length not allowed for Metadata")?;
+                self.write_metadata_table(&obj.metadata)?;
+            }
+            DiarObject::Archive(obj) => {
+                self.write_varuint(ObjectType::Archive as u64)?;
+                ensure(length == 0, &"length not allowed for Archive")?;
+                self.write_object_id(obj.root)?;
+                self.write_metadata_table(&obj.metadata)?;
+            }
+            DiarObject::Root(obj) => {
+                self.write_varuint(ObjectType::Root as u64)?;
+                ensure(length == 0, &"length not allowed for Root")?;
+                self.write_object_id(obj.main)?;
+                for (k, v) in &obj.alt {
+                    self.write_object_id(*v)?;
+                    self.write_full_string(k)?;
+                }
+                self.write_object_id(ObjectId::NONE)?;
+                self.write_metadata_table(&obj.metadata)?;
+            }
+            DiarObject::FilterZstd(obj) => {
+                self.write_varuint(ObjectType::FilterZstd as u64)?;
+                ensure(length == 0, &"length not allowed for FilterZstd")?;
+                self.write_object_ids(&obj.dict_sources)?;
+            }
+            DiarObject::ZstdPreloadList(obj) => {
+                self.write_varuint(ObjectType::FilterZstd as u64)?;
+                ensure(length == 0, &"length not allowed for ZstdPreloadList")?;
+                self.write_object_ids(&obj.list)?;
+            }
         }
 
-        let offset_end_header = self.count();
-        self.out.write_u64::<LE>(END_HEADER)?;
-        self.out.write_u64::<LE>(offset_string_table)?;
-        self.out.write_u64::<LE>(offset_end_header)?;
-        self.out.write_u64::<LE>(root.0)?;
-        Ok(())
-    }
-}
-
-pub struct WriteDirectory<'a, W: Write>(&'a mut DiarWriter<W>, ObjectId);
-impl<'a, W: Write> WriteDirectory<'a, W> {
-    pub fn write_entry(
-        &mut self,
-        name: &str,
-        obj: ObjectId,
-        metadata: Option<ObjectId>,
-    ) -> Result<()> {
-        self.0.write_object_ref(obj)?;
-        self.0.write_opt_object_ref(metadata)?;
-        self.0.write_full_string(name)?;
-        Ok(())
+        let id = ObjectId::new();
+        self.obj_ids.insert(id, header_off);
+        Ok(id)
     }
 
-    pub fn finish(mut self) -> Result<ObjectId> {
-        self.0.write_opt_object_ref(None)?;
-        Ok(self.1)
+    pub fn finish(&mut self, root_id: ObjectId) -> Result<()> {
+        let arc_end = self.stream.seek(SeekFrom::Current(0))?;
+        let length = arc_end - self.rel_offset;
+
+        let obj_offset = self.get_object_offset(root_id)?;
+
+        self.stream.write_u64::<LE>(END_HEADER)?;
+        self.stream.write_u64::<LE>(length)?;
+        self.stream.write_u64::<LE>(obj_offset)?;
+        Ok(())
     }
 }
